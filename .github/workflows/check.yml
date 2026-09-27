@@ -1,0 +1,21 @@
+name: Validate
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node scripts/check-frontend.mjs
+      - run: docker compose config --quiet
+      - run: docker compose up -d --wait --wait-timeout 60
+      - run: |
+          curl --fail http://localhost:8081/healthz
+          curl --fail http://localhost:8081/ | grep -q Deckstruct
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/api/templates)" = 503
+      - if: always()
+        run: docker compose logs --tail 30 && docker compose down

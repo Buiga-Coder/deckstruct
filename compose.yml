@@ -1,0 +1,33 @@
+name: deckstruct
+services:
+  frontend:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    user: "1000:1000"
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    ports:
+      - "${FRONTEND_PORT:-8081}:8080"
+    volumes:
+      - ./frontend:/srv:ro
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /config:uid=1000,gid=1000,mode=0700,size=1m
+      - /data:uid=1000,gid=1000,mode=0700,size=1m
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: 0.25
+    pids_limit: 64
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

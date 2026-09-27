@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+node_modules/
+__pycache__/
+.venv/
+*.log
+*.tar.gz
+data/
+secrets/
+uploads/
+output/
