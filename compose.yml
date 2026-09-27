@@ -11,6 +11,8 @@ services:
       - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
     read_only: true
     cap_drop: [ALL]
+    # The upstream Caddy binary has this file capability; it must be in the bounding set.
+    cap_add: [NET_BIND_SERVICE]
     security_opt: ["no-new-privileges:true"]
     tmpfs:
       - /config:uid=1000,gid=1000,mode=0700,size=1m
