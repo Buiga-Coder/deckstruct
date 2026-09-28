@@ -2060,10 +2060,10 @@ const Theme = {
 const Auth = {
   user: null,
   token: null,
-  init(){
+  async init(){
     this.token = Store.get('auth_token');
     if(this.token){
-      API.me(this.token).then(u => { this.user = u; this._render(); }).catch(()=>this.logout(true));
+      await API.me(this.token).then(u => { this.user = u; this._render(); }).catch(()=>this.logout(true));
     } else this._render();
   },
   async register(data){
@@ -3263,10 +3263,10 @@ const DesignSystem = {
 /* ============================================================
    INIT
 ============================================================ */
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   Typography.init();
   Theme.init();
-  Auth.init();
+  await Auth.init();
   Router.init();
   Workspace.init();
   Settings.load();
