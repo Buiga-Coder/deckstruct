@@ -1,0 +1,10 @@
+.git
+tmp
+**/node_modules
+**/__pycache__
+**/.env
+**/*.db*
+**/config.local.json
+*.tar.gz
+**/*.pptx
+**/secrets

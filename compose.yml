@@ -1,6 +1,68 @@
 name: deckstruct
 services:
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    image: deckstruct-api:${RELEASE_TAG:-local}
+    env_file: ${DECKSTRUCT_ENV_FILE:-.env}
+    environment:
+      PARSER_URL: http://parser:8765
+      DB_PATH: /data/deckstruct.db
+      UPLOAD_DIR: /data/uploads
+      NODE_OPTIONS: --max-old-space-size=128
+    volumes:
+      - ${DECKSTRUCT_DATA_DIR:-./data}/api:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: 0.35
+    pids_limit: 64
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+  parser:
+    build:
+      context: .
+      dockerfile: services/parser/Dockerfile
+    image: deckstruct-parser:${RELEASE_TAG:-local}
+    env_file: ${DECKSTRUCT_ENV_FILE:-.env}
+    environment:
+      PARSER_STORAGE: /data/jobs
+    volumes:
+      - ${DECKSTRUCT_DATA_DIR:-./data}/parser:/data
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=1777,size=192m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 704m
+    memswap_limit: 832m
+    cpus: 0.50
+    pids_limit: 128
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
   frontend:
+    depends_on:
+      api:
+        condition: service_healthy
     image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     user: "1000:1000"
     command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
@@ -19,7 +81,7 @@ services:
       - /data:uid=1000,gid=1000,mode=0700,size=1m
     mem_limit: 64m
     memswap_limit: 64m
-    cpus: 0.25
+    cpus: 0.15
     pids_limit: 64
     restart: unless-stopped
     healthcheck:

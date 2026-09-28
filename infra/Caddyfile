@@ -13,8 +13,10 @@
     }
     @api path /api /api/*
     handle @api {
-        header Content-Type application/json
-        respond `{"message":"Backend is not connected yet","code":"BACKEND_NOT_CONFIGURED"}` 503
+        request_body {
+            max_size 51MB
+        }
+        reverse_proxy api:3000
     }
     handle {
         root * /srv

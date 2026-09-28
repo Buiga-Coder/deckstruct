@@ -4,18 +4,35 @@ permissions:
   contents: read
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
       - run: node scripts/check-frontend.mjs
+      - run: npm ci --prefix services/api
+      - run: node tests/api-integration.cjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-impress poppler-utils fonts-dejavu-core fonts-liberation
+          pip install ./vendor/pptx-template-parser
+          python tests/test_bridge.py
+          cd vendor/pptx-template-parser
+          python -m unittest discover -s tests -v
+      - run: |
+          cp .env.example .env
+          mkdir -p data/api data/parser
+          sudo chown -R 1000:1000 data
       - run: docker compose config --quiet
-      - run: docker compose up -d --wait --wait-timeout 60
+      - run: docker compose up --build -d --wait --wait-timeout 120
       - run: |
           curl --fail http://localhost:8081/healthz
           curl --fail http://localhost:8081/ | grep -q Deckstruct
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/api/templates)" = 503
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8081/api/templates)" = 401
+          curl --fail http://localhost:8081/api/capabilities
       - if: always()
         run: docker compose logs --tail 30 && docker compose down

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# PyCharm
+.idea/
+
+# Секреты и локальные настройки
+.env
+.env.*
+!.env.example
+config.local.json
+
+# Результаты обработки
+output/

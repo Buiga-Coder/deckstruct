@@ -10,3 +10,11 @@ data/
 secrets/
 uploads/
 output/
+*.db
+*.db-shm
+*.db-wal
+*.pyc
+*.egg-info/
+config.local.json
+vendor/pptx-template-parser/filled_test.pptx
+vendor/pptx-template-parser/dataset_inspection.json

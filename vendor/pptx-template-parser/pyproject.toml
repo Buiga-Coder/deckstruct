@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pptx-template-decomposer"
+version = "0.3.0"
+description = "PPTX structure extraction and VLM-assisted semantic decomposition"
+requires-python = ">=3.10"
+dependencies = ["python-pptx>=1.0,<2", "pydantic>=2,<3", "Pillow>=10", "lxml>=5"]
+
+[project.scripts]
+template-parser = "template_parser.cli:main"
+
+[tool.setuptools.package-data]
+template_parser = ["prompts/*.txt", "scripts/*.ps1"]
+
+[tool.setuptools.packages.find]
+include = ["template_parser*"]
