@@ -1,5 +1,8 @@
 /* Real API integration. Existing design assets remain in index.html. */
 (() => {
+  const visibilityStyle = document.createElement('style');
+  visibilityStyle.textContent = '#page-analysis [hidden] { display: none !important; }';
+  document.head.appendChild(visibilityStyle);
   const esc = escapeHtml;
   const labels = {uploaded:'Загружен',queued:'В очереди',extracting:'Извлечение структуры',rendering:'Создание превью',analyzing:'Анализ моделью',exporting:'Подготовка результата',completed:'Анализ завершён',partial:'Частичный результат',failed:'Ошибка анализа',interrupted:'Прерван — можно продолжить',awaiting_configuration:'Структура извлечена; ожидается настройка API',submission_failed:'Ожидает отправки в парсер'};
   const active = new Set(['queued','extracting','rendering','analyzing','exporting']);
