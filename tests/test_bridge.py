@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/pptx-template-parser'))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'services/parser'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'vendor/presentation-builder'))
 from bridge import summarize
 from template_parser.extract import extract_template
 from pptx import Presentation

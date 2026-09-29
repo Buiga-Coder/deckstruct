@@ -9,6 +9,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { Readable } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
+const filename = require('./filenames');
 
 const PORT = Number(process.env.PORT || 3000);
 const SECRET = process.env.JWT_SECRET;
@@ -44,14 +45,21 @@ const columns = new Set(db.prepare('PRAGMA table_info(templates)').all().map(x =
 for (const [name, type] of [['parser_job_id', 'TEXT'], ['parser_status', "TEXT DEFAULT 'uploaded'"], ['parser_version', 'TEXT'], ['parser_sha256', 'TEXT']]) {
   if (!columns.has(name)) db.exec(`ALTER TABLE templates ADD COLUMN ${name} ${type}`);
 }
-// Existing mock decks must never be served as real PPTX files.
-db.prepare("UPDATE decks SET status='generator_unavailable' WHERE status='done'").run();
+const deckColumns = new Set(db.prepare('PRAGMA table_info(decks)').all().map(x => x.name));
+for (const [name,type] of [['generator_job_id','TEXT'],['template_id','TEXT'],['message','TEXT'],['percent','INTEGER DEFAULT 0'],['variants','INTEGER DEFAULT 0'],['usage_counted','INTEGER DEFAULT 0']]) {
+  if(!deckColumns.has(name))db.exec(`ALTER TABLE decks ADD COLUMN ${name} ${type}`);
+}
+db.prepare("UPDATE decks SET status='generator_unavailable' WHERE status='done' AND generator_job_id IS NULL").run();
+// Repair previous mojibake filenames, preserving their IDs, source files and analysis.
+for(const t of db.prepare('SELECT id,name FROM templates').all()) {
+  const repaired=filename(t.name);if(repaired!==t.name)db.prepare('UPDATE templates SET name=? WHERE id=?').run(repaired,t.id);
+}
 const now = Date.now;
 const uid = crypto.randomUUID;
 const audit = (actor, action, target) => db.prepare('INSERT INTO audit_log(actor,action,target,created_at) VALUES(?,?,?,?)').run(actor, action, target, now());
 const pubUser = u => ({ id:u.id, name:u.name, email:u.email, company:u.company, plan:u.plan, role:u.role, usage:u.usage, limit:u.quota, createdAt:u.created_at });
 const pubTemplate = t => ({ id:t.id, name:t.name, slides:t.slides, size:t.size, createdAt:t.created_at, status:t.parser_status, parserVersion:t.parser_version });
-const pubDeck = d => ({ id:d.id, title:d.title, slides:d.slides, status:d.status, templateName:d.template_name, createdAt:d.created_at });
+const pubDeck = d => ({ id:d.id, title:d.title, slides:d.slides, status:d.status, templateName:d.template_name, createdAt:d.created_at, message:d.message, percent:d.percent, variants:d.variants });
 const sign = u => jwt.sign({ id:u.id }, SECRET, { expiresIn:'24h', algorithm:'HS256' });
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const wrap = fn => (req, res, next) => Promise.resolve().then(() => fn(req, res)).catch(next);
@@ -94,7 +102,7 @@ app.get('/healthz', (req,res) => { db.prepare('SELECT 1').get(); res.json({ ok:t
 app.get('/api/capabilities', wrap(async (req,res) => {
   let parser = { available:false, vlmConfigured:false };
   try { const r = await fetch(PARSER+'/healthz', { signal:AbortSignal.timeout(3000) }); if(r.ok) parser = {available:true, ...(await r.json())}; } catch {}
-  res.json({ parser, generation:false });
+  res.json({ parser, generation:!!parser.generation });
 }));
 app.post('/api/auth/register', authLimit, wrap(async (req,res) => {
   const name = text(req.body.name,120), email = emailOf(req.body.email), password = req.body.password;
@@ -150,7 +158,7 @@ async function syncTemplate(t) {
   db.prepare('UPDATE templates SET parser_status=?,parser_version=?,parser_sha256=?,slides=COALESCE(?,slides) WHERE id=?')
     .run(raw.status,raw.version || null,raw.archive_sha256 || null,raw.slides ?? null,t.id);
   // Explicit allowlist: upstream may include private filesystem paths in state.
-  return { status:raw.status, version:raw.version, slides:raw.slides, progress:raw.progress, counts:raw.counts, error:raw.error, archiveSha256:raw.archive_sha256 };
+  return { status:raw.status, version:raw.version, slides:raw.slides, progress:raw.progress, counts:raw.counts, error:raw.error, archiveSha256:raw.archive_sha256, slideStatuses:raw.slideStatuses };
 }
 const upload = multer({ dest:UPLOAD_DIR, limits:{ fileSize:50*1024*1024, files:1, fields:0 }, fileFilter:(req,file,cb) => cb(file.originalname.toLowerCase().endsWith('.pptx') ? null : fail(400,'Нужен файл .pptx'),true) });
 const uploadQuota = (req,res,next) => {
@@ -163,7 +171,7 @@ app.get('/api/templates', auth, (req,res) => res.json(db.prepare('SELECT * FROM 
 app.post('/api/templates', auth, uploadQuota, upload.single('file'), wrap(async (req,res) => {
   if (!req.file) throw fail(400,'Файл не получен');
   const id = uid();
-  db.prepare('INSERT INTO templates(id,owner_id,name,size,file_path,created_at) VALUES(?,?,?,?,?,?)').run(id,req.user.id,path.parse(req.file.originalname).name.slice(0,120),req.file.size,req.file.path,now());
+  db.prepare('INSERT INTO templates(id,owner_id,name,size,file_path,created_at) VALUES(?,?,?,?,?,?)').run(id,req.user.id,path.parse(filename(req.file.originalname)).name.slice(0,120),req.file.size,req.file.path,now());
   const t = db.prepare('SELECT * FROM templates WHERE id=?').get(id);
   try { await submitTemplate(t); }
   catch (e) {
@@ -232,9 +240,58 @@ app.patch('/api/design-systems/:id', auth, wrap(async (req,res) => {
   db.prepare('INSERT INTO design_systems(id,owner_id,data,updated_at) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,updated_at=excluded.updated_at').run(t.id,req.user.id,data,now());
   res.json(req.body);
 }));
-app.get('/api/decks', auth, (req,res) => res.json(db.prepare('SELECT * FROM decks WHERE owner_id=? ORDER BY created_at DESC').all(req.user.id).map(pubDeck)));
-app.post('/api/decks', auth, (req,res) => res.status(503).json({code:'GENERATOR_NOT_CONNECTED',message:'Генератор презентаций ещё не подключён. Анализ шаблонов доступен.'}));
-app.get('/api/decks/:id/download', auth, (req,res) => res.status(503).json({code:'GENERATOR_NOT_CONNECTED',message:'Готового PPTX пока нет: генератор ещё не подключён.'}));
+app.get('/api/decks', auth, wrap(async(req,res) => {
+  const active=db.prepare("SELECT * FROM decks WHERE owner_id=? AND generator_job_id IS NOT NULL AND status IN ('queued','running','submitting') LIMIT 10").all(req.user.id);
+  await Promise.allSettled(active.map(syncDeck));
+  res.json(db.prepare('SELECT * FROM decks WHERE owner_id=? ORDER BY created_at DESC').all(req.user.id).map(pubDeck));
+}));
+const contentUpload=multer({dest:UPLOAD_DIR,limits:{fileSize:50*1024*1024,files:1,fields:5,fieldSize:80000},fileFilter:(req,file,cb)=>cb(file.originalname.toLowerCase().endsWith('.zip')?null:fail(400,'Материалы должны быть ZIP-архивом'),true)});
+const ownedDeck=req=>{const d=db.prepare('SELECT * FROM decks WHERE id=? AND owner_id=?').get(req.params.id,req.user.id);if(!d)throw fail(404,'Презентация не найдена');return d;};
+async function syncDeck(d) {
+  if(!d.generator_job_id)return pubDeck(d);
+  const state=await (await parserFetch('/generations/'+d.generator_job_id)).json();
+  db.transaction(()=>{
+    db.prepare('UPDATE decks SET status=?,message=?,percent=?,variants=? WHERE id=?').run(state.status,state.message||'',state.percent||0,state.variants||0,d.id);
+    if(state.status==='done') {
+      const changed=db.prepare('UPDATE decks SET usage_counted=1 WHERE id=? AND usage_counted=0').run(d.id);
+      if(changed.changes)db.prepare('UPDATE users SET usage=usage+1 WHERE id=?').run(d.owner_id);
+    }
+  })();
+  return pubDeck(db.prepare('SELECT * FROM decks WHERE id=?').get(d.id));
+}
+app.post('/api/decks', auth, contentUpload.single('content'), wrap(async(req,res)=>{
+  try {
+    const t=db.prepare('SELECT * FROM templates WHERE id=? AND owner_id=?').get(String(req.body.template_id||''),req.user.id);
+    if(!t)throw fail(404,'Шаблон не найден');
+    const brief=text(req.body.brief,20000), slides=Number(req.body.slide_count);
+    if(!req.file || !brief || !Number.isInteger(slides) || slides<3 || slides>20)throw fail(400,'Нужны ZIP с материалами, задача и число слайдов от 3 до 20');
+    const pending=db.prepare("SELECT COUNT(*) n FROM decks WHERE owner_id=? AND status IN ('queued','running','submitting')").get(req.user.id).n;
+    if(pending>=2 || req.user.usage+pending>=req.user.quota)throw fail(429,'Достигнут лимит заданий или генераций');
+    const state=await syncTemplate(t);
+    if(!['completed','partial'].includes(state.status) || !state.version || !(state.counts?.valid>0))throw fail(409,'Дождитесь анализа хотя бы одного валидного слайда');
+    if(state.status==='partial' && req.body.allow_partial!=='true')throw fail(409,'Анализ частичный. Подтвердите использование только валидных слайдов.');
+    const id=uid(), jobId=id.replaceAll('-','');
+    db.prepare('INSERT INTO decks(id,owner_id,title,slides,status,template_name,created_at,generator_job_id,template_id) VALUES(?,?,?,?,?,?,?,?,?)').run(id,req.user.id,text(req.body.title,120)||'Новая презентация',slides,'submitting',t.name,now(),jobId,t.id);
+    try {
+      const body=JSON.stringify({job_id:jobId,parser_job_id:t.parser_job_id,version:state.version,archive_sha256:state.archiveSha256,content_name:path.basename(req.file.path),brief,slide_count:slides});
+      await parserFetch('/generations',{method:'POST',headers:{'Content-Type':'application/json'},body});
+      res.status(202).json(await syncDeck(db.prepare('SELECT * FROM decks WHERE id=?').get(id)));
+    }catch(e){db.prepare("UPDATE decks SET status='failed',message=? WHERE id=?").run('Не удалось подтвердить приём задания. Обновите его статус перед повтором.',id);throw e;}
+  } finally {if(req.file)fs.unlink(req.file.path,()=>{});}
+}));
+app.get('/api/decks/:id',auth,wrap(async(req,res)=>res.json(await syncDeck(ownedDeck(req)))));
+app.post('/api/decks/:id/resume',auth,wrap(async(req,res)=>{
+  const d=ownedDeck(req);if(!d.generator_job_id)throw fail(409,'Это старое задание без генератора');
+  await parserFetch(`/generations/${d.generator_job_id}/resume`,{method:'POST'});
+  res.status(202).json(await syncDeck(d));
+}));
+app.get('/api/decks/:id/download',auth,wrap(async(req,res)=>{
+  const d=ownedDeck(req), variant=String(req.query.variant||'1');
+  if(!['1','2','3'].includes(variant))throw fail(400,'Номер варианта: 1, 2 или 3');
+  if((await syncDeck(d)).status!=='done')throw fail(409,'Презентация ещё не готова');
+  res.set('Content-Disposition',`attachment; filename="presentation-${variant}.pptx"; filename*=UTF-8''${encodeURIComponent(d.title+'-'+variant+'.pptx')}`);
+  await sendParserFile(res,`/generations/${d.generator_job_id}/download/${variant}`,'application/vnd.openxmlformats-officedocument.presentationml.presentation');
+}));
 app.delete('/api/decks/:id', auth, (req,res) => {db.prepare('DELETE FROM decks WHERE id=? AND owner_id=?').run(req.params.id,req.user.id);res.json({ok:true});});
 
 app.get('/api/admin/stats', auth, adminOnly, (req,res) => {

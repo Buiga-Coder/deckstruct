@@ -70,6 +70,14 @@ def run_batch(package: Path, config: dict, *, delay=10):
                     row.update(status='completed', needs_review=current.needs_review)
             except APIError as exc:
                 row.update(status='api_error', error=str(exc))
+                # Opt-in deployment policy: isolate a transient slide failure, without
+                # repeating an ambiguously completed paid request. Stop after 3
+                # consecutive transient failures to avoid a failing-provider loop.
+                transient = any(x in str(exc) for x in ('category=timeout', 'category=network_error', 'HTTP 500:', 'HTTP 502:', 'HTTP 503:', 'HTTP 504:'))
+                recent = report['slides'][max(0, report['slides'].index(row)-2):report['slides'].index(row)+1]
+                if config.get('continue_transient_errors') and transient and not (len(recent) == 3 and all(x['status'] == 'api_error' for x in recent)):
+                    save()
+                    continue
                 report['status'] = 'stopped_api_error'
                 save()
                 print(f'{sid}: API error; batch stopped. See {report_path}')
@@ -85,6 +93,6 @@ def run_batch(package: Path, config: dict, *, delay=10):
                 row['status'] = 'interrupted'
         save()
         return report
-    report['status'] = 'finished_with_errors' if any(r['status']=='error' for r in report['slides']) else 'finished'
+    report['status'] = 'finished_with_errors' if any(r['status'] in ('error', 'api_error') for r in report['slides']) else 'finished'
     save()
     return report

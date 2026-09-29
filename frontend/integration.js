@@ -8,9 +8,10 @@
   const active = new Set(['queued','extracting','rendering','analyzing','exporting']);
   let poll, urls = [], analysisId, generation = 0;
   const revoke = () => { urls.forEach(u => URL.revokeObjectURL(u)); urls=[]; };
-  const stop = () => { clearTimeout(poll); generation++; revoke(); };
+  let deckPoll;
+  const stop = () => { clearTimeout(poll); clearTimeout(deckPoll); generation++; revoke(); };
   const originalGo = Router.go.bind(Router);
-  Router.go = id => { stop(); return originalGo(id); };
+  Router.go = id => { stop(); if(id==='result'&&Auth.isAuthed()){const deckId=Store.get('real_deck_id');return deckId?Decks.open(deckId):originalGo('decks');}const result=originalGo(id);if(id==='workspace'&&Auth.isAuthed())Workspace.init();return result; };
   const originalLogout = Auth.logout.bind(Auth);
   Auth.logout = silent => { stop(); Workspace.state.template=null; Workspace.state.contentFiles=[]; Store.del('ds_current_id'); originalLogout(silent); };
   const status = t => labels[t.status] || 'Статус неизвестен';
@@ -22,22 +23,72 @@
   function download(blob,name) { const u=URL.createObjectURL(blob), a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000); }
   function select(t) {
     Workspace.state.template=t;Store.set('ds_current_id',t.id);
-    $('#templateName').textContent=t.name+'.pptx';
-    $('#templateMeta').textContent=`${t.slides || '—'} слайдов · ${status(t)}`;
-    $('#templateInfo').classList.remove('hidden');
-    $('#badge1').className='step-badge active';$('#badge1').textContent='1';
-    $('#pipelineLog').innerHTML=`<div>${esc(status(t))}</div><div>Результаты доступны в разделе «Анализ».</div><div>Генератор презентаций ещё не подключён.</div>`;
-    Workspace._updateProgress();
   }
   Workspace.handleTemplate = async file => {
     try { const t=await API.uploadTemplate(Auth.token,file);select(t);Toast.success('Шаблон сохранён. Открываем анализ.');Router.go('analysis'); }
     catch(e){Toast.error(e.message);}
   };
-  Workspace._updateProgress = () => { $('#generateBtn').disabled=true;$('#generateBtn').textContent='Генератор ещё не подключён'; };
-  Workspace.generate = async () => Toast.info('Генератор ещё не подключён. Сейчас доступен анализ PPTX.');
-  Workspace._finishGeneration = Workspace.generate;
-  Workspace.handleContent = () => Toast.info('Загрузка материалов появится вместе с генератором. Пока можно загрузить и разобрать шаблон PPTX.');
-  Workspace.saveDraft = () => Toast.info('Сохранение задания появится вместе с генератором. Загруженные шаблоны уже сохранены на сервере.');
+  Workspace._updateProgress = () => {};
+  Workspace.init = async () => {
+    const host=$('#page-workspace');
+    if(!$('#generationForm'))host.innerHTML=`<div style="max-width:850px;margin:0 auto;padding:40px 24px 80px">
+      <h1 style="font-size:42px">Создать презентацию</h1><p style="margin:18px 0">Выберите разобранный шаблон, добавьте материалы и получите три редактируемых PPTX.</p>
+      <label class="btn-outline-custom sm">Загрузить новый PPTX<input id="realTemplateUpload" type="file" accept=".pptx" hidden></label>
+      <form id="generationForm" style="display:grid;gap:18px;margin-top:28px">
+        <label>Шаблон<select id="genTemplate" name="template_id" required style="width:100%;padding:12px"></select></label>
+        <button type="button" class="btn-outline-custom sm" id="genAnalysis">Открыть анализ шаблона</button>
+        <label>Название<input name="title" maxlength="120" required placeholder="Например: План развития продукта" style="width:100%;padding:12px"></label>
+        <label>Материалы ZIP (до 50 МБ)<input name="content" type="file" accept=".zip" required style="display:block;margin-top:8px"></label>
+        <p>В ZIP: тексты TXT/MD/DOCX/PDF, таблицы CSV/XLSX и изображения PNG/JPG. До 200 файлов, до 100 МБ после распаковки. Материалы обрабатываются моделью через Polza.</p>
+        <label>Задача и аудитория<textarea name="brief" required maxlength="20000" rows="5" placeholder="Что рассказать, кому и на каком языке? Используйте только факты из материалов." style="width:100%;padding:12px"></textarea></label>
+        <label>Слайдов в каждом варианте<input name="slide_count" type="number" min="3" max="20" value="5" required style="width:100%;padding:12px"></label>
+        <label><input name="allow_partial" type="checkbox" value="true"> Разрешаю использовать только успешно разобранные слайды, если анализ частичный</label>
+        <p id="generationNotice" role="status"></p><button class="btn-custom" type="submit" id="generateBtn">Создать три варианта</button>
+      </form></div>`;
+    const form=$('#generationForm');
+    $('#realTemplateUpload').onchange=e=>{if(e.target.files[0])Workspace.handleTemplate(e.target.files[0]);};
+    $('#genAnalysis').onclick=()=>{Store.set('ds_current_id',$('#genTemplate').value);Router.go('analysis');};
+    form.onsubmit=async e=>{
+      e.preventDefault();const button=$('#generateBtn');button.disabled=true;
+      $('#generationNotice').textContent='Загружаем материалы…';
+      try {
+        const data=await HttpBackend._fetch('/decks',{method:'POST',body:new FormData(form)});
+        $('#generationNotice').textContent='Задание сохранено';Decks.open(data.id);
+      } catch(err){$('#generationNotice').textContent=err.message;}
+      finally{button.disabled=false;}
+    };
+    if(!Auth.isAuthed())return;
+    const chosen=$('#genTemplate').value||Store.get('ds_current_id');
+    try{const list=await API.listTemplates(Auth.token);$('#genTemplate').innerHTML='<option value="">Выберите шаблон</option>'+list.map(t=>`<option value="${esc(t.id)}">${esc(t.name)} — ${esc(status(t))}</option>`).join('');if(list.some(t=>t.id===chosen))$('#genTemplate').value=chosen;}
+    catch(e){$('#generationNotice').textContent=e.message;}
+  };
+  Decks.render = () => {
+    const names={done:'Готово',queued:'В очереди',running:'Генерация',failed:'Ошибка',interrupted:'Прервано',submitting:'Отправка',generator_unavailable:'Старый черновик'};
+    const list=Decks._all.filter(d=>(Decks._filter!=='done'||d.status==='done')&&(Decks._filter!=='draft'||d.status!=='done')&&d.title.toLowerCase().includes(Decks._query||''));
+    $('#decksGrid').innerHTML=list.length?list.map(d=>`<div class="deck-card"><div class="meta"><div class="t">${esc(d.title)}</div><p>${d.slides} слайдов · ${esc(names[d.status]||d.status)}</p><div class="actions"><button data-open="${esc(d.id)}">Открыть</button><button data-remove="${esc(d.id)}">Удалить</button></div></div></div>`).join(''):'Пока нет презентаций. Начните в разделе «Создать».';
+    $$('[data-open]').forEach(b=>b.onclick=()=>Decks.open(b.dataset.open));
+    $$('[data-remove]').forEach(b=>b.onclick=()=>Decks.remove(b.dataset.remove));
+  };
+  Decks.open = async id => {
+    stop();Store.set('real_deck_id',id);originalGo('result');const token=generation;
+    $('#page-result').innerHTML='<div style="max-width:850px;margin:0 auto;padding:40px 24px"><h1 id="realDeckTitle" style="font-size:38px">Презентация</h1><p id="realDeckStatus" role="status" style="margin:24px 0">Загрузка…</p><div id="realDeckActions" style="display:flex;gap:12px;flex-wrap:wrap"></div></div>';
+    async function update(){
+      try {
+        const d=await HttpBackend._fetch('/decks/'+id);if(token!==generation)return;
+        $('#realDeckTitle').textContent=d.title;
+        $('#realDeckStatus').textContent=(d.message||d.status)+(d.status==='running'?` · ${d.percent}%`:'');
+        const actions=$('#realDeckActions');actions.innerHTML='';
+        if(d.status==='done')for(let v=1;v<=d.variants;v++){
+          const b=document.createElement('button');b.className='btn-custom sm';b.textContent=`Скачать вариант ${v}`;b.onclick=async()=>{try{download(await fileResponse(`/api/decks/${id}/download?variant=${v}`),`${d.title}-${v}.pptx`);}catch(e){Toast.error(e.message);}};actions.append(b);
+        }
+        if(['failed','interrupted'].includes(d.status)){
+          const b=document.createElement('button');b.className='btn-outline-custom sm';b.textContent='Продолжить';b.onclick=async()=>{try{await HttpBackend._fetch(`/decks/${id}/resume`,{method:'POST'});await update();}catch(e){Toast.error(e.message);}};actions.append(b);
+        }
+        if(['queued','running','submitting'].includes(d.status))deckPoll=setTimeout(update,4000);
+      }catch(e){if(token===generation)$('#realDeckStatus').textContent=e.message;}
+    }
+    await update();
+  };
   Gallery.use = () => { Toast.info('В галерее показаны примеры дизайна. Для анализа загрузите свой PPTX.'); Router.go('workspace'); };
   Templates.use = id => { const t=Templates._all.find(t=>t.id===id);if(t){select(t);Router.go('workspace');} };
   const originalTemplatesRender = Templates.render.bind(Templates);
@@ -95,7 +146,7 @@
       $('#analysisName').textContent=data.template.name;
       let message=labels[data.status] || data.status;
       const counts=data.progress?.counts;
-      if(counts)message+=` · обработано ${(counts.completed||0)+(counts.skipped||0)} из ${data.progress.total}`;
+      if(counts)message+=` · готовы ${(counts.completed||0)+(counts.skipped||0)} из ${data.progress.total} · ошибок ${(counts.error||0)+(counts.api_error||0)} · ожидают ${counts.pending||0}${data.progress.currentSlide?' · сейчас '+data.progress.currentSlide:''}`;
       if(data.status==='partial')message+=' — не все слайды прошли проверку; доступен частичный пакет.';
       if(data.status==='failed')message+=' — '+(data.error || 'проверьте исходный файл');
       if(data.status==='awaiting_configuration')message+='; настройте ключ модели, затем нажмите «Продолжить анализ».';
@@ -117,8 +168,10 @@
         const signature=id+':'+(data.version||'')+':'+data.status;
         if($('#analysisSlides').dataset.signature!==signature && !['queued','extracting','rendering'].includes(data.status)){
           $('#analysisSlides').dataset.signature=signature;revoke();
-          const slides=data.result?.slides || Array.from({length:s.slides},(_,i)=>({slide_id:'s'+(i+1),components:[]}));
-          $('#analysisSlides').innerHTML=slides.map(slide=>`<article class="card" style="padding:18px;background:var(--surface);border:1px solid var(--line);border-radius:18px"><h4>${esc(slide.slide_id)}</h4><img data-slide="${esc(slide.slide_id)}" alt="Превью ${esc(slide.slide_id)}" style="width:100%;margin:12px 0;border-radius:8px" loading="lazy"><p>${slide.needs_review?'Требуется проверка результата':''}</p><ul>${(slide.components||[]).map(c=>`<li>${esc(c.name||c.kind||c.id)} · ${(c.slots||[]).length} полей для замены</li>`).join('')}</ul></article>`).join('');
+          const analyzed=new Map((data.result?.slides||[]).map(x=>[x.slide_id,x]));
+          const slideStates=new Map((data.slideStatuses||[]).map(x=>[x.slide_id,x]));
+          const slides=Array.from({length:s.slides},(_,i)=>({slide_id:'s'+(i+1),components:[],...analyzed.get('s'+(i+1))}));
+          $('#analysisSlides').innerHTML=slides.map(slide=>`<article class="card" style="padding:18px;background:var(--surface);border:1px solid var(--line);border-radius:18px"><h4>${esc(slide.slide_id)}</h4><p>${esc(({completed:"Готово",skipped:"Готово (сохранено)",error:"Ошибка разметки моделью",api_error:"Ошибка API — можно повторить",pending:"Ожидает анализа",processing:"Анализируется"})[slideStates.get(slide.slide_id)?.status] || "Ожидает анализа")}</p><img data-slide="${esc(slide.slide_id)}" alt="Превью ${esc(slide.slide_id)}" style="width:100%;margin:12px 0;border-radius:8px" loading="lazy"><p>${slide.needs_review?'Требуется проверка результата':''}</p><ul>${(slide.components||[]).map(c=>`<li>${esc(c.name||c.kind||c.id)} · ${(c.slots||[]).length} полей для замены</li>`).join('')}</ul></article>`).join('');
           for(const img of $$('#analysisSlides img')){
             try{const blob=await fileResponse(`/api/templates/${id}/previews/${img.dataset.slide}.png`);if(token!==generation)return;const url=URL.createObjectURL(blob);urls.push(url);img.src=url;}
             catch {img.alt='Превью пока недоступно';}
@@ -130,9 +183,6 @@
   }
   document.addEventListener('DOMContentLoaded',()=>{
     Workspace._updateProgress();
-    const note=document.createElement('div');note.style.cssText='padding:10px 20px;background:var(--accent-soft);color:var(--ink);font-size:14px;text-align:center';
-    note.textContent='Загрузка и анализ PPTX подключены. Генератор новых презентаций ещё в разработке.';
-    $('#page-workspace').prepend(note);
     const link=document.createElement('a');link.href='/admin.html';link.textContent='Админ-панель';link.style.cssText='display:inline-block;margin:20px';$('#page-profile').append(link);
   });
 })();

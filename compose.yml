@@ -31,6 +31,7 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
   parser:
+    init: true
     build:
       context: .
       dockerfile: services/parser/Dockerfile
@@ -40,13 +41,14 @@ services:
       PARSER_STORAGE: /data/jobs
     volumes:
       - ${DECKSTRUCT_DATA_DIR:-./data}/parser:/data
+      - ${DECKSTRUCT_DATA_DIR:-./data}/api/uploads:/inputs:ro
     tmpfs:
       - /tmp:uid=1000,gid=1000,mode=1777,size=192m
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 704m
-    memswap_limit: 832m
+    mem_limit: 896m
+    memswap_limit: 1280m
     cpus: 0.50
     pids_limit: 128
     restart: unless-stopped

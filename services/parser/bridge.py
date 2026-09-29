@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import uuid
+import zipfile
 from collections import Counter
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +16,7 @@ from template_parser.batch import atomic_json, run_batch
 from template_parser.extract import extract_template, sha256
 from template_parser.render import render_package
 from template_parser.exporter import export_package
+from generation import Generations
 
 NS = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
 ROOT = Path(os.environ.get('PARSER_STORAGE', '/data/jobs'))
@@ -31,7 +33,8 @@ def configuration():
     config.setdefault('timeout_seconds', 180)
     config.setdefault('max_tokens', 8192)
     config.setdefault('max_retries', 2)
-    config.setdefault('validation_retries', 1)
+    config.setdefault('validation_retries', 2)
+    config['continue_transient_errors'] = True
     config['renderer'] = 'libreoffice'
     return config
 
@@ -76,6 +79,18 @@ def summarize(manifest):
 
 
 class IntegratedJobs(Jobs):
+    def state(self, job_id):
+        state = super().state(job_id)
+        report = self.folder(job_id) / 'package' / 'analysis_report.json'
+        if report.exists():
+            data = json.loads(report.read_text(encoding='utf-8'))
+            state['slideStatuses'] = [{'slide_id': r['slide_id'], 'status': r['status'],
+                'reason': ('API_TIMEOUT' if 'category=timeout' in r.get('error', '') else
+                           'API_ERROR' if r['status'] == 'api_error' else
+                           'MODEL_VALIDATION' if r['status'] == 'error' else None)} for r in data['slides']]
+            state['progress']['currentSlide'] = next((r['slide_id'] for r in data['slides'] if r['status'] == 'processing'), None)
+        return state
+
     def submit(self, data):
         if shutil.disk_usage(self.root).free < 2 * 1024 ** 3:
             raise OverflowError('Storage reserve reached')
@@ -101,13 +116,14 @@ class IntegratedJobs(Jobs):
             self.update(job_id, slides=len(manifest['slides']))
             if not (package / 'previews').exists():
                 self.update(job_id, status='rendering')
-                render_package(package, renderer='libreoffice')
+                render_package(package, renderer='libreoffice', width=1000,
+                               timeout=max(300, min(1800, len(manifest['slides']) * 25)))
             config = configuration()
             if not configured(config):
                 self.update(job_id, status='awaiting_configuration', error='VLM_NOT_CONFIGURED')
                 return
             self.update(job_id, status='analyzing', error=None)
-            delay = max(0, min(60, float(os.environ.get('VLM_SLIDE_DELAY', '10'))))
+            delay = max(0, min(60, float(os.environ.get('VLM_SLIDE_DELAY', '1'))))
             report = run_batch(package, config, delay=delay)
             self.update(job_id, status='exporting')
             version = uuid.uuid4().hex
@@ -116,7 +132,12 @@ class IntegratedJobs(Jobs):
                         version=version, counts=exported['counts'],
                         archive_sha256=sha256(Path(exported['archive']).read_bytes()), error=None)
         except Exception as exc:
-            self.update(job_id, status='failed', error=type(exc).__name__)
+            detail = str(exc)
+            key = os.environ.get('VLM_API_KEY')
+            if key:
+                detail = detail.replace(key, '[REDACTED]')
+            atomic_json(self.folder(job_id) / 'error.json', {'type':type(exc).__name__, 'detail':detail[:1500]})
+            self.update(job_id, status='failed', error='RENDER_FAILED' if not (self.folder(job_id)/'package/previews').exists() else type(exc).__name__)
         finally:
             self.capacity.release()
 
@@ -126,6 +147,7 @@ def main():
     if len(token) < 32:
         raise ValueError('PARSER_API_TOKEN must contain at least 32 characters')
     jobs = IntegratedJobs(ROOT, configuration())
+    generations = Generations(jobs)
     # Reuse authenticated upstream HTTP routes on the private Docker network.
     prototype = make_server(jobs, token, port=0)
     upstream = prototype.RequestHandlerClass
@@ -135,9 +157,39 @@ def main():
         def dispatch(self, method):
             parts = urlsplit(self.path).path.strip('/').split('/')
             if method == 'GET' and parts == ['healthz']:
-                return self.reply(200, {'ok': True, 'vlmConfigured': configured(configuration())})
+                return self.reply(200, {'ok': True, 'vlmConfigured': configured(configuration()), 'generation': configured(configuration())})
             if not self.authorized():
                 return self.reply(401, {'error': 'Unauthorized'})
+            if parts[0] == 'generations':
+                try:
+                    if method == 'POST' and len(parts) == 1:
+                        size = int(self.headers.get('Content-Length', '0'))
+                        if not 0 < size <= 100000 or self.headers.get('Transfer-Encoding'):
+                            return self.reply(413, {'error':'Invalid body size'})
+                        return self.reply(202, generations.submit(json.loads(self.rfile.read(size))))
+                    if len(parts) == 2 and method == 'GET':
+                        return self.reply(200, generations.state(parts[1]))
+                    if method == 'POST' and len(parts) == 3 and parts[2] == 'resume':
+                        generations.resume(parts[1])
+                        return self.reply(202, generations.state(parts[1]))
+                    if method == 'GET' and len(parts) == 4 and parts[2] == 'download':
+                        file = generations.download(parts[1], parts[3])
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
+                        self.send_header('Content-Length', str(file.stat().st_size))
+                        self.end_headers()
+                        with file.open('rb') as source:
+                            shutil.copyfileobj(source, self.wfile, 1024 * 1024)
+                        return
+                    return self.reply(404, {'error':'Not found'})
+                except FileNotFoundError:
+                    return self.reply(404, {'error':'Not found'})
+                except OverflowError:
+                    return self.reply(429, {'error':'Queue full'})
+                except (ValueError, KeyError, zipfile.BadZipFile):
+                    return self.reply(400, {'error':'Invalid generation request'})
+                except Exception:
+                    return self.reply(500, {'error':'Generation service error'})
             if method == 'GET' and len(parts) >= 3 and parts[0] == 'jobs':
                 try:
                     folder = jobs.folder(parts[1])
